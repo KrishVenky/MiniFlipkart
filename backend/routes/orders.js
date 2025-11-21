@@ -1,75 +1,77 @@
 // ... existing code ...
+const orderOrchestration = require("../services/orderOrchestration");
 
 /**
- * @route   POST /api/orders/checkout/save
- * @desc    Save intermediate checkout data
+ * @route   POST /api/orders/submit
+ * @desc    Submit order with orchestration
  * @access  Private
  */
-router.post("/checkout/save", protect, async (req, res) => {
+router.post("/submit", protect, async (req, res) => {
   try {
-    const { step, data } = req.body;
-    const userId = req.user.id;
+    const { idempotencyKey } = req.headers;
 
-    // Save checkout progress
-    const checkoutData = await CheckoutProgress.findOneAndUpdate(
-      { userId },
-      {
-        userId,
-        step,
-        data,
-        updatedAt: new Date(),
-      },
-      { upsert: true, new: true }
-    );
+    // Check for duplicate idempotency key
+    if (idempotencyKey) {
+      const existingOrder = await Order.findOne({ idempotencyKey });
+      if (existingOrder) {
+        return res.status(200).json({
+          success: true,
+          data: existingOrder,
+          message: "Order already processed",
+        });
+      }
+    }
 
-    // Generate resume token
-    const resumeToken = jwt.sign(
-      { checkoutId: checkoutData._id },
-      process.env.JWT_SECRET,
-      { expiresIn: "24h" }
-    );
+    const order = await orderOrchestration.createOrder(req.body, req.user.id);
 
-    res.status(200).json({
+    if (idempotencyKey) {
+      order.idempotencyKey = idempotencyKey;
+      await order.save();
+    }
+
+    res.status(201).json({
       success: true,
-      resumeToken,
-      step: checkoutData.step,
+      data: order,
     });
   } catch (error) {
-    console.error("Save checkout error:", error);
+    console.error("Order submission error:", error);
     res.status(500).json({
       success: false,
-      error: "Error saving checkout progress",
+      error: error.message || "Error submitting order",
     });
   }
 });
 
 /**
- * @route   GET /api/orders/checkout/resume
- * @desc    Resume checkout from saved state
+ * @route   GET /api/orders/:id/status
+ * @desc    Get order status
  * @access  Private
  */
-router.get("/checkout/resume", protect, async (req, res) => {
+router.get("/:id/status", protect, async (req, res) => {
   try {
-    const { token } = req.query;
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    
-    const checkoutData = await CheckoutProgress.findById(decoded.checkoutId);
-    if (!checkoutData) {
+    const order = await Order.findById(req.params.id);
+
+    if (!order || order.userId.toString() !== req.user.id.toString()) {
       return res.status(404).json({
         success: false,
-        error: "Checkout session not found",
+        error: "Order not found",
       });
     }
 
     res.status(200).json({
       success: true,
-      step: checkoutData.step,
-      data: checkoutData.data,
+      data: {
+        id: order._id,
+        state: order.state,
+        status: order.state,
+        createdAt: order.createdAt,
+        updatedAt: order.updatedAt,
+      },
     });
   } catch (error) {
-    res.status(400).json({
+    res.status(500).json({
       success: false,
-      error: "Invalid or expired resume token",
+      error: "Error fetching order status",
     });
   }
 });
