@@ -1,51 +1,70 @@
-// ... existing schema ...
+// ... existing imports ...
 
-const checkoutProgressSchema = new mongoose.Schema({
+const orderSchema = new mongoose.Schema({
   userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
     required: true,
   },
-  step: {
+  items: [{
+    productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+    quantity: { type: Number, required: true },
+    price: { type: Number, required: true },
+  }],
+  total: {
+    type: Number,
+    required: true,
+  },
+  state: {
     type: String,
-    enum: ["cart", "shipping", "payment", "review"],
-    default: "cart",
+    enum: ["pending", "processing", "shipped", "delivered", "cancelled"],
+    default: "pending",
+    index: true,
   },
-  data: {
+  shippingAddress: {
     type: mongoose.Schema.Types.Mixed,
-    default: {},
+    required: true,
   },
+  paymentMethod: {
+    type: String,
+    required: true,
+  },
+  idempotencyKey: {
+    type: String,
+    unique: true,
+    sparse: true,
+  },
+  auditRefs: [{
+    action: {
+      type: String,
+      required: true,
+    },
+    timestamp: {
+      type: Date,
+      default: Date.now,
+    },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    metadata: mongoose.Schema.Types.Mixed,
+  }],
   createdAt: {
     type: Date,
     default: Date.now,
+    index: true,
   },
   updatedAt: {
     type: Date,
     default: Date.now,
   },
+}, {
+  timestamps: true,
 });
 
-// ... existing order schema with state enums ...
+// Indexes for performance
+orderSchema.index({ userId: 1, createdAt: -1 });
+orderSchema.index({ state: 1, createdAt: -1 });
 
-const orderSchema = new mongoose.Schema({
-  // ... existing fields ...
-  state: {
-    type: String,
-    enum: ["pending", "processing", "shipped", "delivered", "cancelled"],
-    default: "pending",
-  },
-  auditRefs: [{
-    action: String,
-    timestamp: Date,
-    userId: mongoose.Schema.Types.ObjectId,
-  }],
-  // ... rest of fields ...
-});
-
-// ... rest of model ...
-
-module.exports = {
-  Order: mongoose.model("Order", orderSchema),
-  CheckoutProgress: mongoose.model("CheckoutProgress", checkoutProgressSchema),
-};
+module.exports = mongoose.model("Order", orderSchema);
 
