@@ -1,78 +1,99 @@
 // ... existing code ...
 
 /**
- * @route   POST /api/orders/checkout/save
- * @desc    Save intermediate checkout data
+ * @route   GET /api/orders/:id/tracking
+ * @desc    Get shipment tracking information
  * @access  Private
  */
-router.post("/checkout/save", protect, async (req, res) => {
+router.get("/:id/tracking", protect, async (req, res) => {
   try {
-    const { step, data } = req.body;
-    const userId = req.user.id;
+    const order = await Order.findById(req.params.id).populate("shipment");
 
-    // Save checkout progress
-    const checkoutData = await CheckoutProgress.findOneAndUpdate(
-      { userId },
-      {
-        userId,
-        step,
-        data,
-        updatedAt: new Date(),
-      },
-      { upsert: true, new: true }
-    );
-
-    // Generate resume token
-    const resumeToken = jwt.sign(
-      { checkoutId: checkoutData._id },
-      process.env.JWT_SECRET,
-      { expiresIn: "24h" }
-    );
-
-    res.status(200).json({
-      success: true,
-      resumeToken,
-      step: checkoutData.step,
-    });
-  } catch (error) {
-    console.error("Save checkout error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Error saving checkout progress",
-    });
-  }
-});
-
-/**
- * @route   GET /api/orders/checkout/resume
- * @desc    Resume checkout from saved state
- * @access  Private
- */
-router.get("/checkout/resume", protect, async (req, res) => {
-  try {
-    const { token } = req.query;
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    
-    const checkoutData = await CheckoutProgress.findById(decoded.checkoutId);
-    if (!checkoutData) {
+    if (!order || order.userId.toString() !== req.user.id.toString()) {
       return res.status(404).json({
         success: false,
-        error: "Checkout session not found",
+        error: "Order not found",
+      });
+    }
+
+    if (!order.shipment) {
+      return res.status(404).json({
+        success: false,
+        error: "Tracking information not available",
       });
     }
 
     res.status(200).json({
       success: true,
-      step: checkoutData.step,
-      data: checkoutData.data,
+      data: {
+        trackingNumber: order.shipment.trackingNumber,
+        carrier: order.shipment.carrier,
+        status: order.shipment.status,
+        currentLocation: order.shipment.currentLocation,
+        timeline: order.shipment.timeline,
+      },
     });
   } catch (error) {
-    res.status(400).json({
+    res.status(500).json({
       success: false,
-      error: "Invalid or expired resume token",
+      error: "Error fetching tracking information",
     });
   }
 });
+
+/**
+ * @route   POST /api/orders/webhook/tracking
+ * @desc    Webhook endpoint for carrier tracking updates
+ * @access  Public (with webhook secret validation)
+ */
+router.post("/webhook/tracking", async (req, res) => {
+  try {
+    // Validate webhook secret
+    const webhookSecret = req.headers["x-webhook-secret"];
+    if (webhookSecret !== process.env.WEBHOOK_SECRET) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { carrier, trackingNumber, status, location, timestamp } = req.body;
+
+    // Find shipment by tracking number
+    const shipment = await Shipment.findOne({ trackingNumber });
+    if (!shipment) {
+      return res.status(404).json({ error: "Shipment not found" });
+    }
+
+    // Update shipment status
+    shipment.status = status;
+    shipment.currentLocation = location;
+    shipment.timeline.push({
+      status,
+      location,
+      timestamp: new Date(timestamp),
+    });
+    await shipment.save();
+
+    // Update order status if delivered
+    if (status === "delivered") {
+      await Order.findByIdAndUpdate(shipment.orderId, { state: "delivered" });
+    }
+
+    // Send notification to user
+    await sendTrackingNotification(shipment.userId, {
+      status,
+      location,
+      trackingNumber,
+    });
+
+    res.status(200).json({ success: true });
+  } catch (error) {
+    console.error("Webhook error:", error);
+    res.status(500).json({ error: "Webhook processing failed" });
+  }
+});
+
+async function sendTrackingNotification(userId, data) {
+  // Implementation: Send email/push notification
+}
 
 // ... rest of routes ...
 
