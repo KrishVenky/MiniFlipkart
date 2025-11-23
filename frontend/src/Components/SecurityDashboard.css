@@ -1,0 +1,27 @@
+.security-dashboard {
+  padding: 20px;
+}
+
+.security-section {
+  margin-bottom: 30px;
+  padding: 20px;
+  background: #f8f9fa;
+  border-radius: 8px;
+}
+
+.security-section h3 {
+  margin-top: 0;
+}
+
+.security-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid #ddd;
+}
+
+.security-item:last-child {
+  border-bottom: none;
+}
+

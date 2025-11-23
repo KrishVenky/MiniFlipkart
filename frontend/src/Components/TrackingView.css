@@ -1,0 +1,23 @@
+.tracking-view {
+  padding: 20px;
+}
+
+.tracking-header {
+  margin-bottom: 20px;
+}
+
+.tracking-timeline {
+  margin-top: 20px;
+}
+
+.timeline-item {
+  padding: 10px;
+  border-left: 2px solid #ddd;
+  margin-left: 10px;
+  padding-left: 20px;
+}
+
+.timeline-item.active {
+  border-color: #007bff;
+}
+

@@ -1,53 +1,169 @@
-// ... existing code ...
+const express = require("express");
+const { body, validationResult } = require("express-validator");
+const crypto = require("crypto");
+const Order = require("../models/Order");
+const Shipment = require("../models/Shipment");
 const orderOrchestration = require("../services/orderOrchestration");
+const { protect } = require("../middleware/auth");
+const { AppError } = require("../middleware/errorHandler");
+
+const router = express.Router();
+const CHECKOUT_SESSION_TTL = 15 * 60 * 1000; // 15 minutes
+const checkoutSessions = new Map();
+
+/**
+ * Validate express-validator results.
+ * @param {import("express").Request} req
+ * @returns {import("express-validator").Result}
+ */
+const ensureValid = (req) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    const validationError = new AppError("Validation failed", 400);
+    validationError.details = errors.array();
+    throw validationError;
+  }
+  return errors;
+};
+
+/**
+ * Extracts a consistent idempotency key from headers.
+ */
+const getIdempotencyKey = (req) => {
+  return (
+    req.headers["idempotency-key"] ||
+    req.headers.idempotencykey ||
+    req.headers["x-idempotency-key"] ||
+    null
+  );
+};
+
+/**
+ * @route   POST /api/orders/checkout/save
+ * @desc    Save checkout progress for resumable flows
+ * @access  Private
+ */
+router.post(
+  "/checkout/save",
+  protect,
+  [
+    body("step").isString().trim().notEmpty().withMessage("Step is required"),
+    body("data").isObject().withMessage("Step payload is required"),
+  ],
+  async (req, res, next) => {
+    try {
+      ensureValid(req);
+
+      const resumeToken = crypto.randomUUID();
+      checkoutSessions.set(resumeToken, {
+        userId: req.user.id.toString(),
+        step: req.body.step,
+        data: req.body.data,
+        updatedAt: Date.now(),
+      });
+
+      res.status(200).json({
+        success: true,
+        resumeToken,
+        expiresAt: new Date(Date.now() + CHECKOUT_SESSION_TTL).toISOString(),
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   GET /api/orders/checkout/resume
+ * @desc    Resume checkout progress
+ * @access  Private
+ */
+router.get("/checkout/resume", protect, async (req, res, next) => {
+  try {
+    const { token } = req.query;
+    if (!token) {
+      throw new AppError("Resume token is required", 400);
+    }
+
+    const session = checkoutSessions.get(token);
+    const now = Date.now();
+    if (
+      !session ||
+      session.userId !== req.user.id.toString() ||
+      now - session.updatedAt > CHECKOUT_SESSION_TTL
+    ) {
+      return res.status(404).json({
+        success: false,
+        error: "Resume token not found or expired",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      step: session.step,
+      data: session.data,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 /**
  * @route   POST /api/orders/submit
  * @desc    Submit order with orchestration
  * @access  Private
  */
-router.post("/submit", protect, async (req, res) => {
-  try {
-    const { idempotencyKey } = req.headers;
+router.post(
+  "/submit",
+  protect,
+  [
+    body("items").isArray({ min: 1 }).withMessage("At least one item is required"),
+    body("items.*.productId").isString().withMessage("Product ID is required"),
+    body("items.*.quantity").isInt({ min: 1 }).withMessage("Quantity must be at least 1"),
+    body("shippingAddress").notEmpty().withMessage("Shipping address is required"),
+    body("paymentMethod").isString().notEmpty().withMessage("Payment method is required"),
+  ],
+  async (req, res, next) => {
+    try {
+      ensureValid(req);
+      const idempotencyKey = getIdempotencyKey(req);
 
-    // Check for duplicate idempotency key
-    if (idempotencyKey) {
-      const existingOrder = await Order.findOne({ idempotencyKey });
-      if (existingOrder) {
-        return res.status(200).json({
-          success: true,
-          data: existingOrder,
-          message: "Order already processed",
-        });
+      if (idempotencyKey) {
+        const existingOrder = await Order.findOne({ idempotencyKey });
+        if (existingOrder) {
+          return res.status(200).json({
+            success: true,
+            data: existingOrder,
+            message: "Order already processed",
+          });
+        }
       }
-    }
 
-    const order = await orderOrchestration.createOrder(req.body, req.user.id);
+      const order = await orderOrchestration.createOrder(req.body, req.user.id);
 
-    if (idempotencyKey) {
-      order.idempotencyKey = idempotencyKey;
+      if (idempotencyKey) {
+        order.idempotencyKey = idempotencyKey;
+      }
+
       await order.save();
-    }
+      await ensureShipment(order, req.user.id);
 
-    res.status(201).json({
-      success: true,
-      data: order,
-    });
-  } catch (error) {
-    console.error("Order submission error:", error);
-    res.status(500).json({
-      success: false,
-      error: error.message || "Error submitting order",
-    });
+      res.status(201).json({
+        success: true,
+        data: order,
+      });
+    } catch (error) {
+      next(error);
+    }
   }
-});
+);
 
 /**
  * @route   GET /api/orders/:id/status
  * @desc    Get order status
  * @access  Private
  */
-router.get("/:id/status", protect, async (req, res) => {
+router.get("/:id/status", protect, async (req, res, next) => {
   try {
     const order = await Order.findById(req.params.id);
 
@@ -69,10 +185,7 @@ router.get("/:id/status", protect, async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: "Error fetching order status",
-    });
+    next(error);
   }
 });
 
@@ -81,7 +194,7 @@ router.get("/:id/status", protect, async (req, res) => {
  * @desc    Get shipment tracking information
  * @access  Private
  */
-router.get("/:id/tracking", protect, async (req, res) => {
+router.get("/:id/tracking", protect, async (req, res, next) => {
   try {
     const order = await Order.findById(req.params.id).populate("shipment");
 
@@ -110,10 +223,7 @@ router.get("/:id/tracking", protect, async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: "Error fetching tracking information",
-    });
+    next(error);
   }
 });
 
@@ -122,9 +232,8 @@ router.get("/:id/tracking", protect, async (req, res) => {
  * @desc    Webhook endpoint for carrier tracking updates
  * @access  Public (with webhook secret validation)
  */
-router.post("/webhook/tracking", async (req, res) => {
+router.post("/webhook/tracking", async (req, res, next) => {
   try {
-    // Validate webhook secret
     const webhookSecret = req.headers["x-webhook-secret"];
     if (webhookSecret !== process.env.WEBHOOK_SECRET) {
       return res.status(401).json({ error: "Unauthorized" });
@@ -132,43 +241,73 @@ router.post("/webhook/tracking", async (req, res) => {
 
     const { carrier, trackingNumber, status, location, timestamp } = req.body;
 
-    // Find shipment by tracking number
     const shipment = await Shipment.findOne({ trackingNumber });
     if (!shipment) {
       return res.status(404).json({ error: "Shipment not found" });
     }
 
-    // Update shipment status
     shipment.status = status;
     shipment.currentLocation = location;
     shipment.timeline.push({
       status,
       location,
       timestamp: new Date(timestamp),
+      description: `Status updated to ${status}`,
     });
     await shipment.save();
 
-    // Update order status if delivered
     if (status === "delivered") {
       await Order.findByIdAndUpdate(shipment.orderId, { state: "delivered" });
     }
 
-    // Send notification to user
     await sendTrackingNotification(shipment.userId, {
       status,
       location,
       trackingNumber,
+      carrier,
     });
 
     res.status(200).json({ success: true });
   } catch (error) {
-    console.error("Webhook error:", error);
-    res.status(500).json({ error: "Webhook processing failed" });
+    next(error);
   }
 });
 
+/**
+ * Ensures every order has a shipment stub so that tracking routes work.
+ */
+const ensureShipment = async (order, userId) => {
+  if (order.shipment) {
+    return order;
+  }
+
+  const shipment = await Shipment.create({
+    orderId: order._id,
+    userId,
+    carrier: "fedex",
+    carrierId: `fedex-${Date.now()}`,
+    trackingNumber: `TRK-${order._id.toString().slice(-6)}-${Date.now()}`,
+    status: "pending",
+    currentLocation: "Fulfillment Center",
+    timeline: [
+      {
+        status: "pending",
+        location: "Fulfillment Center",
+        description: "Order created",
+      },
+    ],
+  });
+
+  order.shipment = shipment._id;
+  await order.save();
+  return order;
+};
+
+/**
+ * Placeholder notification dispatcher.
+ */
 async function sendTrackingNotification(userId, data) {
-  // Implementation: Send email/push notification
+  console.log(`Notify ${userId} about shipment`, data);
 }
 
-// ... rest of routes ...
+module.exports = router;

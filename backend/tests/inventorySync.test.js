@@ -1,7 +1,8 @@
-const InventorySyncWorker = require("../../worker/inventorySync");
-const Product = require("../../models/Product");
+const InventorySyncWorker = require("../worker/inventorySync");
+const Product = require("../models/Product");
+const axios = require("axios");
 
-jest.mock("../../models/Product");
+jest.mock("../models/Product");
 jest.mock("axios");
 
 describe("Inventory Sync Worker", () => {

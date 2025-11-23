@@ -1,48 +1,61 @@
-const request = require("supertest");
-const express = require("express");
-const auditRoutes = require("../../routes/audit");
-const tamperDetection = require("../../services/tamperDetection");
+const crypto = require("crypto");
+const mongoose = require("mongoose");
+const AuditLog = require("../models/AuditLog");
+const tamperDetection = require("../services/tamperDetection");
+const auditLogger = require("../middleware/auditLogger");
+const { connect, clearDatabase, closeDatabase } = require("./utils/mongo");
 
-const app = express();
-app.use(express.json());
-app.use("/api/audit", auditRoutes);
+const buildChecksum = (entry) => {
+  const data = JSON.stringify({
+    action: entry.action,
+    userId: entry.userId,
+    resource: entry.resource,
+    timestamp: entry.timestamp,
+    metadata: entry.metadata,
+  });
+  return crypto.createHash("sha256").update(data).digest("hex");
+};
+
+const createImmutableAuditLog = async () => {
+  const baseEntry = {
+    action: "TEST_ACTION",
+    userId: new mongoose.Types.ObjectId(),
+    resource: "/test",
+    method: "GET",
+    metadata: { email: "user@example.com" },
+    timestamp: new Date(),
+  };
+
+  const checksum = buildChecksum(baseEntry);
+  return AuditLog.create({ ...baseEntry, checksum });
+};
 
 describe("Compliance Tests", () => {
+  beforeAll(async () => {
+    await connect();
+  });
+
+  afterEach(async () => {
+    await clearDatabase();
+  });
+
+  afterAll(async () => {
+    await closeDatabase();
+  });
+
   test("Audit logs are immutable", async () => {
-    // Create audit log
-    const log = await AuditLog.create({
-      action: "TEST_ACTION",
-      resource: "/test",
-      method: "GET",
-      checksum: "test",
-    });
+    const log = await createImmutableAuditLog();
 
-    // Try to update (should fail)
-    try {
-      await AuditLog.updateOne({ _id: log._id }, { action: "MODIFIED" });
-      fail("Should not allow updates");
-    } catch (error) {
-      expect(error.message).toContain("immutable");
-    }
+    await expect(
+      AuditLog.updateOne({ _id: log._id }, { action: "MODIFIED" })
+    ).rejects.toThrow("Audit logs cannot be updated");
 
-    // Try to delete (should fail)
-    try {
-      await log.remove();
-      fail("Should not allow deletion");
-    } catch (error) {
-      expect(error.message).toContain("cannot be deleted");
-    }
+    await expect(log.remove()).rejects.toThrow("Audit logs cannot be deleted");
   });
 
   test("Tamper detection identifies modified logs", async () => {
-    const log = await AuditLog.create({
-      action: "TEST_ACTION",
-      resource: "/test",
-      method: "GET",
-      checksum: "correct_checksum",
-    });
+    const log = await createImmutableAuditLog();
 
-    // Manually modify checksum (simulating tampering)
     await AuditLog.collection.updateOne(
       { _id: log._id },
       { $set: { checksum: "tampered_checksum" } }
@@ -54,14 +67,15 @@ describe("Compliance Tests", () => {
     );
 
     expect(result.tamperedCount).toBeGreaterThan(0);
+    expect(result.tamperedLogs[0]._id.toString()).toBe(log._id.toString());
   });
 
-  test("Sensitive data is redacted in audit logs", async () => {
-    const auditLogger = require("../../middleware/auditLogger");
+  test("Sensitive data is redacted in audit logs", () => {
     const metadata = {
       password: "secret123",
       cardNumber: "4111111111111111",
       email: "test@example.com",
+      notes: "non-sensitive",
     };
 
     const redacted = auditLogger.redactSensitiveData(metadata);
@@ -69,6 +83,6 @@ describe("Compliance Tests", () => {
     expect(redacted.password).toBe("[REDACTED]");
     expect(redacted.cardNumber).toBe("[REDACTED]");
     expect(redacted.email).toBe("[REDACTED]");
+    expect(redacted.notes).toBe("non-sensitive");
   });
 });
-

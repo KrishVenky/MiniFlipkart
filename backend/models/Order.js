@@ -1,4 +1,4 @@
-// ... existing imports ...
+const mongoose = require("mongoose");
 
 const orderSchema = new mongoose.Schema({
   userId: {
@@ -28,6 +28,11 @@ const orderSchema = new mongoose.Schema({
   paymentMethod: {
     type: String,
     required: true,
+  },
+  shipment: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Shipment",
+    default: null,
   },
   idempotencyKey: {
     type: String,
